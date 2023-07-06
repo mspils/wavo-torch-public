@@ -115,10 +115,12 @@ class WaVoLightningModule(pl.LightningModule):
 
         # TODO check if i can just convert this to a Tensor earlier. Lightning should move it?
         if batch_idx == 0 and isinstance(self.mean, float):
-            device = torch.device(pred.get_device())
-            self.mean = torch.tensor(self.mean, device=device)
-            self.scale = torch.tensor(self.scale, device=device)
-
+            #device = torch.device(pred.get_device())
+            #self.mean = torch.tensor(self.mean, device=device)
+            #self.scale = torch.tensor(self.scale, device=device)
+            self.mean = torch.tensor(self.mean)
+            self.scale = torch.tensor(self.scale)
+            
         pred = pred*self.scale + self.mean
         return pred
 
