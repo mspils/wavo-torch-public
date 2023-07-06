@@ -115,10 +115,13 @@ class WaVoCallBack(Callback):
             Tuple: y_true, y_pred, y_true_flood, y_pred_flood
         """
 
-        y_true = trainer.datamodule.scale * y_true.cuda() + trainer.datamodule.mean
+        #y_true = trainer.datamodule.scale * y_true.cuda() + trainer.datamodule.mean
+        y_true = trainer.datamodule.scale * y_true + trainer.datamodule.mean
 
         y_pred = trainer.predict(pl_module, data_loader)
-        y_pred = torch.concat(y_pred).cuda()
+        #y_pred = torch.concat(y_pred).cuda()
+        y_pred = torch.concat(y_pred)
+
 
         mask = torch.any(torch.greater(y_true, self.threshold), axis=1)
 
