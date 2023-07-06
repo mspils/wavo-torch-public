@@ -72,9 +72,9 @@ def main():
 
         trainer = pl.Trainer(default_root_dir=config['log_dir'],
                              logger=logger,
-                             # accelerator="auto",
-                             accelerator="gpu",
-                             devices=1,
+                             accelerator="auto",
+                             #accelerator="gpu",
+                             #devices=1,
                              # fast_dev_run=True,
                              callbacks=callbacks,
                              max_epochs=50,
