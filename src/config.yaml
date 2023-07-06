@@ -1,0 +1,40 @@
+# lightning.pytorch==2.0.3
+seed_everything: true
+trainer:
+  devices: 1 #until i figure out the bug
+  logger: null
+  callbacks: null
+  fast_dev_run: false
+  max_epochs: 50
+  #default_root_dir: ../../models_torch/cli/
+  default_root_dir: ../models_torch/treia/
+  log_every_n_steps: 1
+model:
+  hidden_size_lstm: 128
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.2
+  learning_rate: 0.001
+data:
+  filename: null
+  level_name_org: null
+  in_size: 144
+  out_size: 48
+  batch_size: 2048
+  differencing: 0
+wavo_callback:
+  chosen_metrics:
+  - mse
+  - mae
+  - kge
+  - rmse
+  - r2
+  - nse
+  - p10
+  - p20
+early_stopping:
+  monitor: hp/val_loss
+  min_delta: 0.0
+  patience: 2
+  mode: min
+  # python main.py fit --config config.yaml --data.filename ../../data/input/FoehrdenBarl3.csv --data.level_name_org FoehrdenBarl_pegel_cm
