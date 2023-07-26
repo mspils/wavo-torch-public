@@ -9,7 +9,7 @@ from lightning.pytorch.cli import LightningCLI
 from lightning.pytorch.loggers import TensorBoardLogger
 
 import metrics as mt
-from callbacks import WaVoCallBack
+from callbacks import WaVoCallback
 from data_tools import WaVoDataModule
 from models import WaVoLightningModule
 
@@ -33,7 +33,7 @@ class MyLightningCLI(LightningCLI):
         parser.link_arguments("data.in_size", "model.in_size")
         parser.link_arguments("data.out_size", "model.out_size")
 
-        parser.add_lightning_class_args(WaVoCallBack, "wavo_callback")
+        parser.add_lightning_class_args(WaVoCallback, "wavo_callback")
         # parser.set_defaults({"wavo_callback.chosen_metrics": ['nse', 'p10']})
 
         parser.add_lightning_class_args(EarlyStopping, "early_stopping")

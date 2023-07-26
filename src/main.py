@@ -4,12 +4,11 @@ Main Module to start training
 import lightning.pytorch as pl
 import torch
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
-from lightning.pytorch.cli import LightningCLI
 
 from lightning.pytorch.loggers import TensorBoardLogger
 
 import metrics as mt
-from callbacks import WaVoCallBack
+from callbacks import WaVoCallback
 from data_tools import WaVoDataModule
 from models import WaVoLightningModule
 
@@ -45,12 +44,10 @@ def main():
 
     for _ in range(10):
 
-        # data_module = WaVoDataModule(**config_debug)
         data_module = WaVoDataModule(**config)
         data_module.prepare_data()
         data_module.setup(stage='fit')
 
-        # print(data_module.scaler)
         # TODO kwargs for neural network?
         model = WaVoLightningModule(
             data_module.mean,
@@ -65,8 +62,7 @@ def main():
         # Callbacks & Logging
         early_stop_callback = EarlyStopping(
             monitor="hp/val_loss", mode="min", patience=3)
-        my_callback = WaVoCallBack()
-        # my_callback = WaVoCallBack(chosen_metrics={'nse': mt.nse_series})
+        my_callback = WaVoCallback()
         callbacks = [early_stop_callback, my_callback]
         logger = TensorBoardLogger(config['log_dir'], default_hp_metric=False)
 
@@ -75,7 +71,6 @@ def main():
                              # accelerator="auto",
                              accelerator="gpu",
                              devices=1,
-                             # fast_dev_run=True,
                              callbacks=callbacks,
                              max_epochs=50,
                              log_every_n_steps=1,

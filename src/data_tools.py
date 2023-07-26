@@ -3,13 +3,14 @@ Provides tools to generate dataset for waterlevel forecasting.
 The important part is the WaVoDataModule class
 """
 
-import pandas as pd
-from sklearn.preprocessing import StandardScaler  # , MinMaxScaler
-from torch.utils.data import DataLoader, Dataset
+import pickle
+
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import torch
-import pickle
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, Dataset
 
 
 def fill_missing_values(df: pd.DataFrame, max_fill=10):
@@ -55,7 +56,7 @@ class LargeGapError(Exception):
 class MyDataset(Dataset):
     """Custom trivial Dataset, because using the normal one doesn't work for unknown reasons
     Args:
-        X (Tensor): Input values 
+        X (Tensor): Input values
         y (Tensor): Target values
     """
 
@@ -84,14 +85,25 @@ class WaVoDataModule(pl.LightningDataModule):
         percentile (float, optional): percentile to define flood values. If > 1 it is used as an absolute value, not percentile. Defaults to 0.95.
         train (float, optional): share of training data (first train %). Defaults to 0.7.
         val (float, optional): share of validation data (directly after train). Defaults to .15.
-        test (float, optional):share of test data (directly after val) DOESN'T ACTUALLY DO ANYTHING. Defaults to .15.   
+        scaler (StandardScaler, optional): Scaler to use for input data. Only given when the DataModule is created for prediction. Defaults to None.
+        target_min (float, optional): Minimum value of target data. Only given when the DataModule is created for prediction. Defaults to None.
+        target_max (float, optional): Maximum value of target data. Only given when the DataModule is created for prediction. Defaults to None.
     """
 
-    # pylint: disable-next=unused-argument
-    def __init__(self, filename, level_name_org, in_size=144, out_size=48, batch_size=2048, differencing=0, percentile=0.95, train=0.7, val=.15, test=.15, start=None, scaler=None, mean=None, scale=None, **kwargs) -> None:
+    def __init__(self, filename, level_name_org,
+            in_size=144,
+            out_size=48,
+            batch_size=2048,
+            differencing=0,
+            percentile=0.95,
+            train=0.7,
+            val=.15,
+            scaler=None,
+            target_min=None,
+            target_max=None,
+            **kwargs) -> None:
         super().__init__()
-        self.filename = filename
-        # self.batch_size = batch_size
+        self.filename = str(filename)
         self.gauge_column = level_name_org
         self.target_column = level_name_org
         self.in_size = in_size
@@ -100,17 +112,64 @@ class WaVoDataModule(pl.LightningDataModule):
         self.percentile = percentile
         self.train = train
         self.val = val
-        self.start = start
         self.scaler = scaler
-        self.mean = mean
-        self.scale = scale
-        self.save_hyperparameters(ignore='start')  # TODO ignore?
+        self.target_min = torch.tensor(target_min, dtype=torch.float32) if isinstance(target_min,float) else target_min #this is kinda messy
+        self.target_max = torch.tensor(target_max, dtype=torch.float32) if isinstance(target_max,float) else target_max
+        self.threshold = None
+        self.feature_count = None
+        self.save_hyperparameters()
 
     def prepare_data(self):
-        pass
+
+        if (self.scaler is None and
+            self.target_min is None and
+            self.target_max is None and
+            self.threshold is None and
+            self.feature_count is None):
+
+            df = pd.read_csv(self.filename, index_col=0, parse_dates=True)
+            df = fill_missing_values(df)
+
+            if self.differencing == 1:
+                self.target_column = 'd1'
+                df[self.target_column] = df[self.gauge_column].diff()
+
+            # drop the first value, it's nan if differencing, but for comparing we need to always drop it
+            df = df[1:]
+            if 0 < self.percentile < 1:
+                self.threshold = df[self.gauge_column].quantile(
+                    self.percentile).item()
+            else:
+                self.threshold = self.percentile
+
+
+            val_idx = int(self.train*len(df))
+            train= df[:val_idx]
+
+            self.feature_count = train.shape[-1]
+            _, y_train_temp = self.create_dataset(train)
+
+
+            self.target_min = y_train_temp.min()
+            self.target_max = y_train_temp.max()
+            self.scaler = StandardScaler()
+            self.scaler.fit(train)
+
+
+            self.save_hyperparameters({
+                "target_min": self.target_min.item(),
+                "target_max": self.target_max.item(),
+                "scaler": pickle.dumps(self.scaler),
+                "threshold": self.threshold})
+        elif (self.scaler is None or
+            self.target_min is None or
+            self.target_max is None or
+            self.threshold is None or
+            self.feature_count is None):
+            raise ValueError("If you provide a scaler, you also need to provide target_min, target_max, threshold and feature_count")
 
     def setup(self, stage: str):
-        # TODO implement stages
+        # TODO implement stages. skip loading if already loaded
 
         df = pd.read_csv(self.filename, index_col=0, parse_dates=True)
         df = fill_missing_values(df)
@@ -121,54 +180,31 @@ class WaVoDataModule(pl.LightningDataModule):
 
         # drop the first value, it's nan if differencing, but for comparing we need to always drop it
         df = df[1:]
-        if 0 < self.percentile < 1:
-            self.threshold = df[self.gauge_column].quantile(
-                self.percentile).item()
-        else:
-            self.threshold = self.percentile
 
         val_idx = int(self.train*len(df))
         test_idx = int(val_idx + self.val*len(df))
+
+        #if stage == 'fit':
         train, val, test = df[:val_idx], df[val_idx:test_idx], df[test_idx:]
 
-        if self.mean is None and self.scale is None and self.scaler is None:
-            _, y_train_temp = self.create_dataset(train)
 
-            ss_target = StandardScaler()
-            ss_target.fit(y_train_temp)
+        # Normalize input data and append min max scaled targets.
+        train_ss = pd.DataFrame(self.scaler.transform(train), index=train.index, columns=train.columns)
+        train_ss['target'] = (train[self.target_column]- self.target_min.item()) / (self.target_max.item()-self.target_min.item())
+        val_ss = pd.DataFrame(self.scaler.transform(val), index=val.index, columns=val.columns)
+        val_ss['target'] = (val[self.target_column]- self.target_min.item()) / (self.target_max.item()-self.target_min.item())
+        test_ss = pd.DataFrame(self.scaler.transform(test), index=test.index, columns=test.columns)
+        test_ss['target'] = (test[self.target_column]- self.target_min.item()) / (self.target_max.item()-self.target_min.item())
 
-            self.mean = ss_target.mean_.mean().item()
-            # TODO use actual scalers?
-            # TODO save scaler somehow
-            self.scale = ss_target.scale_.mean().item()
 
-            self.scaler = StandardScaler()
-            self.scaler.fit(train)
-
-            self.save_hyperparameters({"mean": self.mean,
-                                       "scale": self.scale,
-                                       "scaler": pickle.dumps(self.scaler),
-                                       "threshold": self.threshold})
-        else:
-            assert self.mean is not None and self.scale is not None and self.scaler is not None
-
-        train_ss = pd.DataFrame(self.scaler.transform(
-            train), index=train.index, columns=train.columns)
-        val_ss = pd.DataFrame(self.scaler.transform(
-            val), index=val.index, columns=val.columns)
-        test_ss = pd.DataFrame(self.scaler.transform(
-            test), index=test.index, columns=test.columns)
-
-        X_train, self.y_train = self.create_dataset(train_ss)
-        X_val,  self.y_val = self.create_dataset(val_ss)
-        X_test, self.y_test = self.create_dataset(test_ss)
-        self.feature_count = X_train.shape[-1]
+        X_train, self.y_train = self.create_dataset(train_ss,target_idx=-1)
+        X_val,  self.y_val = self.create_dataset(val_ss,target_idx=-1)
+        X_test, self.y_test = self.create_dataset(test_ss,target_idx=-1)
 
         self.train_set = MyDataset(X_train, self.y_train)
         self.val_set = MyDataset(X_val, self.y_val)
         self.test_set = MyDataset(X_test, self.y_test)
 
-        # self.save_hyperparameters({"mean": self.mean, "scale": self.scale})
 
     def train_dataloader(self):
         return DataLoader(self.train_set, batch_size=self.hparams.batch_size, shuffle=True, num_workers=8)
@@ -183,23 +219,23 @@ class WaVoDataModule(pl.LightningDataModule):
         # return the trainset, but sorted
         return DataLoader(self.train_set, batch_size=self.hparams.batch_size, shuffle=False, num_workers=8)
 
-    def create_dataset(self, df):
-        """Transforms a dataframe into a tuple of Tensors, where each element contains 
+    def create_dataset(self, df,target_idx=None):  # -> Tuple[torch.Tensor, torch.Tensor]:
+        """Transforms a dataframe into a tuple of Tensors, where each element contains
         the last in_size input values/ next out_size target values
 
         Args:
-            df (_type_): _description_
+            df (pd.DataFrame): input dataframe
 
         Returns:
-            _type_: _description_
+            X,y: tuple of Tensors
         """
         dataset = df.values
-
-        target_idx = df.columns.get_loc(self.target_column)
+        if target_idx is None:
+            target_idx = df.columns.get_loc(self.target_column)
 
         X, y = [], []
         for i in range(len(dataset)-self.in_size-self.out_size):
-            feature = dataset[i:i+self.in_size]
+            feature = dataset[i:i+self.in_size,:-1]
             target = dataset[i+self.in_size:i +
                              self.out_size+self.in_size, target_idx]
             X.append(feature)
@@ -209,7 +245,49 @@ class WaVoDataModule(pl.LightningDataModule):
         y = np.array(y)
         return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
-    def get_data_forecast(self, start=None, end=None):
+    def get_forecast_tensor(self,start,mode='single'):
+        """if mode is single, returns a scaled tensor and a pd.DatetimeIndex
+        if mode is ensemble, returns a dataframe with unscaled values and a pd.DatetimeIndex
+
+        Basically this function loads data, does some preprocessing and cuts out the part that is needed for forecasting
+
+        Args:
+            start (str): start time of the forecast -1h
+            mode (str, optional): single or ensemble. Defaults to 'single'.
+
+        Returns:
+            _type_: _description_
+        """
+        df = pd.read_csv(self.filename, index_col=0, parse_dates=True)
+        df = fill_missing_values(df)
+
+        if self.differencing == 1:  # TODO actually implement differencing
+            self.target_column = 'd1'
+            df[self.target_column] = df[self.gauge_column].diff()
+
+        if start is None:
+            start_index = 0
+        else:
+            start_time = pd.to_datetime(start)
+            start_index = max(0, df.index.get_indexer(
+                [start_time], method='nearest')[0] - self.in_size + 1)
+
+        forecast_index = pd.DatetimeIndex([start_time], freq='h')
+
+        end_index = start_index + self.in_size
+
+        df = df[start_index:end_index]
+
+        if mode == 'ensemble':
+            return df, forecast_index
+
+        df_scaled = pd.DataFrame(self.scaler.transform(df), index=df.index, columns=df.columns)
+        X = torch.tensor(np.array([df_scaled.values]), dtype=torch.float32)
+
+        return X, forecast_index
+
+
+    def get_data_forecast(self, start=None, end=None, mode='evaluate'):
         """_summary_
 
         Args:
@@ -219,177 +297,49 @@ class WaVoDataModule(pl.LightningDataModule):
         df = pd.read_csv(self.filename, index_col=0, parse_dates=True)
         df = fill_missing_values(df)
 
-        if self.differencing == 1:
+        if self.differencing == 1:  # TODO actually implement differencing
             self.target_column = 'd1'
             df[self.target_column] = df[self.gauge_column].diff()
 
         if start is None:
-            start = 0
+            start_index = 0
+        else:
+            start_time = pd.to_datetime(start)
+            start_index = max(0, df.index.get_indexer(
+                [start_time], method='nearest')[0] - self.in_size + 1)
 
-        if end is None:
-            end = len(df)
-        df = df[start:end]
+        if mode == 'single':
+            end_index = start_index + self.in_size
+        elif end is None and mode == 'evaluate':
+            end_index = len(df)
+        else:
+            end_time = pd.to_datetime(end)
+            end_index = min(len(df), df.index.get_indexer(
+                [end_time], method='nearest')[0] + self.out_size + 1)  # TODO check if this is correct
 
-        # TODO start_index function
-        # _, y_org = self.create_dataset(df)
+            # end is None and mode == 'single':
+
+        df = df[start_index:end_index]
         target_idx = df.columns.get_loc(self.target_column)
         y_true = df.iloc[self.in_size-1:-(self.out_size+1), target_idx]
 
         df_scaled = pd.DataFrame(self.scaler.transform(
             df), index=df.index, columns=df.columns)
-        X, y = self.create_dataset(df_scaled)
 
-        dataset = MyDataset(X, y)
-        data_loader = DataLoader(
-            dataset, batch_size=self.hparams.batch_size, num_workers=8)
+        if mode == 'single':
+            X = torch.tensor(np.array([df_scaled.values]), dtype=torch.float32)
+            y = torch.zeros((1, self.out_size), dtype=torch.float32)
+            y_true = pd.DatetimeIndex(
+                [start_time], freq='h')
+            dataset = MyDataset(X, y)
+            data_loader = DataLoader(dataset, 1, num_workers=1)
+
+        else:
+            df_scaled['target'] = (df[self.target_column]- self.target_min.item()) / (self.target_max.item()-self.target_min.item())
+
+            X, y = self.create_dataset(df_scaled)
+            dataset = MyDataset(X, y)
+            data_loader = DataLoader(
+                dataset, batch_size=self.hparams.batch_size, num_workers=8)
 
         return df, data_loader, y_true
-
-
-class WaVoDataModuleCLI(pl.LightningDataModule):
-    """Provides dataloades for waterlevel forecasting
-    Args:
-        filename (str|Path): Path to .csv file, first column should be a timeindex
-        level_name_org (str): Name of the column with target values
-        in_size (int, optional): input length in hours. Defaults to 144.
-        out_size (int, optional): output length in hours. Defaults to 48.
-        batch_size (int, optional): batch_size. Defaults to 128.
-        differencing (int, optional): How offen to difference the timeseries (not yet implemented). Defaults to 0.
-        percentile (float, optional): percentile to define flood values. If > 1 it is used as an absolute value, not percentile. Defaults to 0.95.
-        train (float, optional): share of training data (first train %). Defaults to 0.7.
-        val (float, optional): share of validation data (directly after train). Defaults to .15.
-        test (float, optional):share of test data (directly after val) DOESN'T ACTUALLY DO ANYTHING. Defaults to .15.   
-    """
-
-    # pylint: disable-next=unused-argument
-    def __init__(self, filename, level_name_org, in_size=144, out_size=48, batch_size=2048, differencing=0, percentile=0.95, train=0.7, val=.15, test=.15, **kwargs) -> None:
-        super().__init__()
-        self.filename = filename
-        # self.batch_size = batch_size
-        self.gauge_column = level_name_org
-        self.target_column = level_name_org
-        self.in_size = in_size
-        self.out_size = out_size
-        self.differencing = differencing
-        self.percentile = percentile
-        self.train = train
-        self.val = val
-
-        # self.save_hyperparameters()
-
-        # This is ugly, but necessary for the CLI to work
-        df = pd.read_csv(self.filename, index_col=0, parse_dates=True)
-        df = fill_missing_values(df)
-
-        if self.differencing == 1:
-            self.target_column = 'd1'
-            df[self.target_column] = df[self.gauge_column].diff()
-
-        # drop the first value, it's nan if differencing, but for comparing we need to always drop it
-        df = df[1:]
-        if 0 < self.percentile < 1:
-            self.threshold = df[self.gauge_column].quantile(
-                self.percentile).item()
-        else:
-            self.threshold = self.percentile
-
-        val_idx = int(self.train*len(df))
-        df_train = df[:val_idx]
-
-        X_train_temp, y_train_temp = self.create_dataset(df_train)
-        self.feature_count = X_train_temp.shape[-1]
-
-        ss_target = StandardScaler()
-        ss_target.fit(y_train_temp)
-        self.mean = ss_target.mean_.mean().item()  # TODO use actual scalers?
-        self.scale = ss_target.scale_.mean().item()
-
-        # del train
-
-        self.save_hyperparameters()
-
-    def prepare_data(self):
-        pass
-
-    def setup(self, stage: str):
-        df = pd.read_csv(self.filename, index_col=0, parse_dates=True)
-        df = fill_missing_values(df)
-
-        if self.differencing == 1:
-            self.target_column = 'd1'
-            df[self.target_column] = df[self.gauge_column].diff()
-
-        # drop the first value, it's nan if differencing, but for comparing we need to always drop it
-        df = df[1:]
-        if 0 < self.percentile < 1:
-            self.threshold = df[self.gauge_column].quantile(
-                self.percentile).item()
-        else:
-            self.threshold = self.percentile
-
-        val_idx = int(self.train*len(df))
-        test_idx = int(val_idx + self.val*len(df))
-        train, val, test = df[:val_idx], df[val_idx:test_idx], df[test_idx:]
-
-        # _, y_train_temp = self.create_dataset(train)
-
-        # ss_target = StandardScaler()
-        # ss_target.fit(y_train_temp)
-        # self.mean = ss_target.mean_.mean().item()  # TODO use actual scalers?
-        # self.scale = ss_target.scale_.mean().item()
-
-        ss = StandardScaler()
-        train_ss = pd.DataFrame(ss.fit_transform(
-            train), index=train.index, columns=train.columns)
-        val_ss = pd.DataFrame(ss.transform(
-            val), index=val.index, columns=val.columns)
-        test_ss = pd.DataFrame(ss.transform(
-            test), index=test.index, columns=test.columns)
-
-        X_train, self.y_train = self.create_dataset(train_ss)
-        X_val,  self.y_val = self.create_dataset(val_ss)
-        X_test, self.y_test = self.create_dataset(test_ss)
-        # self.feature_count = X_train.shape[-1]
-
-        self.train_set = MyDataset(X_train, self.y_train)
-        self.val_set = MyDataset(X_val, self.y_val)
-        self.test_set = MyDataset(X_test, self.y_test)
-
-    def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.hparams.batch_size, shuffle=True, num_workers=8)
-
-    def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.hparams.batch_size, shuffle=False, num_workers=8)
-
-    def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.hparams.batch_size, shuffle=False, num_workers=8)
-
-    def predict_dataloader(self):
-        # return the trainset, but sorted
-        return DataLoader(self.train_set, batch_size=self.hparams.batch_size, shuffle=False, num_workers=8)
-
-    def create_dataset(self, df):
-        """Transforms a dataframe into a tuple of Tensors, where each element contains 
-        the last in_size input values/ next out_size target values
-
-        Args:
-            df (_type_): _description_
-
-        Returns:
-            _type_: _description_
-        """
-        dataset = df.values
-
-        target_idx = df.columns.get_loc(self.target_column)
-
-        X, y = [], []
-        for i in range(len(dataset)-self.in_size-self.out_size):
-            feature = dataset[i:i+self.in_size]
-            target = dataset[i+self.in_size:i +
-                             self.out_size+self.in_size, target_idx]
-            X.append(feature)
-            y.append(target)
-
-        X = np.array(X)
-        y = np.array(y)
-        return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)

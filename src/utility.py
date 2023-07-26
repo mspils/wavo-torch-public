@@ -1,6 +1,7 @@
 """
 All utility functions that didn't fit anywhere else
 """
+import sys
 import pandas as pd
 
 from typing import Union, Dict, Tuple
@@ -152,3 +153,8 @@ def get_end_index(end: Union[float, str],
         end = df.index.get_indexer([end], method='nearest')[0]
         end = max(0, end+1)
     return end
+
+
+def debugger_is_active() -> bool:
+    """Return if the debugger is currently active"""
+    return hasattr(sys, 'gettrace') and sys.gettrace() is not None

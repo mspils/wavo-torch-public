@@ -151,3 +151,30 @@ def p20_series(y_true, y_pred):
     diff = torch.abs(torch.subtract(y_true, y_pred))
     nom = torch.sum(torch.greater(diff, 20), axis=0)
     return nom / (y_true.shape[0]/100)
+
+
+def get_metric_dict(metric_name_list) -> dict:
+    """Takes a list of metric names and returns a dictionary of metric names and functions.
+
+    Args:
+        metric_name_list (_type_): _description_
+
+    Returns:
+        dict: _description_
+    """
+    METRIC_MAPPING = {'nse': nse_series,
+                      'kge': kge_series,
+                      'mse': mse_series,
+                      'mae': mae_series,
+                      'p10': p10_series,
+                      'p20': p20_series,
+                      'rmse': rmse_series,
+                      'r2': r_squared_series}
+
+    metrics = {}
+    for el in metric_name_list:
+        if el in METRIC_MAPPING:
+            metrics[el] = METRIC_MAPPING[el]
+        else:
+            raise ValueError(f'{el} is not a valid metric name.')
+    return metrics
