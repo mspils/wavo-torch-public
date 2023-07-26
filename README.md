@@ -2,9 +2,9 @@
 
 ## Usage
 
-Currently only main_hyper.py and predict.py work. Not sure about the Dockerfile
-The first for training models and doing hyperparameter optimization, the second for inference.
-For the hyperparameter optimization you may need to modify the source code to change the variable storage_base, where optuna logs the experiments to. And create the parent folder.
+Currently only main_hyper.py and predict.py work. Not sure about the Dockerfile.  
+The first for training models and doing hyperparameter optimization, the second for inference.  
+For the hyperparameter optimization you may need to modify the source code to change the variable storage_base, where optuna logs the experiments to. And create the parent folder.  
 
 Without CUDA the whole thing will be VERY slow.
 
